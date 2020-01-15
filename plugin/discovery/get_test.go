@@ -103,7 +103,7 @@ func TestMain(m *testing.M) {
 
 func TestVersionListing(t *testing.T) {
 	i := &ProviderInstaller{}
-	versions, err := i.listProviderVersions("test")
+	versions, err := i.listProviderVersions("test", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,7 @@ func TestProviderChecksum(t *testing.T) {
 	i := &ProviderInstaller{}
 
 	// we only need the checksum, as getter is doing the actual file comparison.
-	sha256sum, err := i.getProviderChecksum("template", "0.1.0")
+	sha256sum, err := i.getProviderChecksum("template", "0.1.0", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +298,7 @@ func TestProviderChecksumBadSignature(t *testing.T) {
 	i := &ProviderInstaller{}
 
 	// we only need the checksum, as getter is doing the actual file comparison.
-	sha256sum, err := i.getProviderChecksum("badsig", "0.1.0")
+	sha256sum, err := i.getProviderChecksum("badsig", "0.1.0", true)
 	if err == nil {
 		t.Fatal("expcted error")
 	}

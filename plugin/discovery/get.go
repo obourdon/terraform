@@ -101,19 +101,39 @@ type ProviderInstaller struct {
 // be presented alongside context about what is being installed, and thus the
 // error messages do not redundantly include such information.
 func (i *ProviderInstaller) Get(provider string, req Constraints) (PluginMeta, error) {
-	versions, err := i.listProviderVersions(provider)
-	// TODO: return multiple errors
+	fallback_modes := []bool{false, true}
+	if GetReleaseHost(false) == GetReleaseHost(true) {
+		fallback_modes = []bool{true}
+	}
+	used_fallback_mode := true
+	var versions []Version = nil
+	var err error = nil
+	for _, fallback := range fallback_modes {
+		versions, err = i.listProviderVersions(provider, fallback)
+		// TODO: return multiple errors
+		if err != nil {
+			// try potential next loop
+			continue
+		}
+
+		if len(versions) == 0 {
+			err = ErrorNoSuitableVersion
+			// try potential next loop
+			continue
+		}
+
+		versions = allowedVersions(versions, req)
+		if len(versions) == 0 {
+			err = ErrorNoSuitableVersion
+			// try potential next loop
+			continue
+		}
+		used_fallback_mode = fallback
+		// Suitable version found, exit from loop
+		break
+	}
 	if err != nil {
 		return PluginMeta{}, err
-	}
-
-	if len(versions) == 0 {
-		return PluginMeta{}, ErrorNoSuitableVersion
-	}
-
-	versions = allowedVersions(versions, req)
-	if len(versions) == 0 {
-		return PluginMeta{}, ErrorNoSuitableVersion
 	}
 
 	// sort them newest to oldest
@@ -126,71 +146,65 @@ func (i *ProviderInstaller) Get(provider string, req Constraints) (PluginMeta, e
 	}
 
 	// take the first matching plugin we find
-	fallback_modes := []bool{false, true}
-	if GetReleaseHost(false) == GetReleaseHost(true) {
-		fallback_modes = []bool{true}
-	}
 	for _, v := range versions {
-		for _, fallback := range fallback_modes {
-			url := i.providerURL(provider, v.String(), fallback)
+		url := i.providerURL(provider, v.String(), used_fallback_mode)
 
-			if !i.SkipVerify {
-				sha256, err := i.getProviderChecksum(provider, v.String())
-				if err != nil {
-					log.Printf("[ERROR] fetching provider SHA256 for %s version %s Error: %s", provider, v, err)
-					return PluginMeta{}, err
-				}
-
-				// add the checksum parameter for go-getter to verify the download for us.
-				if sha256 != "" {
-					url = url + "?checksum=sha256:" + sha256
-				}
+		if !i.SkipVerify {
+			sha256, err := i.getProviderChecksum(provider, v.String(), used_fallback_mode)
+			if err != nil {
+				log.Printf("[ERROR] fetching provider SHA256 for %s version %s Error: %s", provider, v, err)
+				return PluginMeta{}, err
 			}
 
-			log.Printf("[DEBUG] fetching provider info for %s version %s from %s", provider, v, url)
-			if checkPlugin(url, i.PluginProtocolVersion) {
-				i.Ui.Info(fmt.Sprintf("- Downloading plugin for provider %q (%s)...", provider, v.String()))
-				log.Printf("[DEBUG] getting provider %q version %q", provider, v)
-				err := i.install(provider, v, url)
-				if err != nil {
-					return PluginMeta{}, err
-				}
-
-				// Find what we just installed
-				// (This is weird, because go-getter doesn't directly return
-				//  information about what was extracted, and we just extracted
-				//  the archive directly into a shared dir here.)
-				log.Printf("[DEBUG] looking for the %s %s plugin we just installed", provider, v)
-				metas := FindPlugins("provider", []string{i.Dir})
-				log.Printf("[DEBUG] all plugins found %#v", metas)
-				metas, _ = metas.ValidateVersions()
-				metas = metas.WithName(provider).WithVersion(v)
-				log.Printf("[DEBUG] filtered plugins %#v", metas)
-				if metas.Count() == 0 {
-					// This should never happen. Suggests that the release archive
-					// contains an executable file whose name doesn't match the
-					// expected convention.
-					return PluginMeta{}, fmt.Errorf(
-						"failed to find installed plugin version %s; this is a bug in Terraform and should be reported",
-						v,
-					)
-				}
-
-				if metas.Count() > 1 {
-					// This should also never happen, and suggests that a
-					// particular version was re-released with a different
-					// executable filename. We consider releases as immutable, so
-					// this is an error.
-					return PluginMeta{}, fmt.Errorf(
-						"multiple plugins installed for version %s; this is a bug in Terraform and should be reported",
-						v,
-					)
-				}
-
-				// By now we know we have exactly one meta, and so "Newest" will
-				// return that one.
-				return metas.Newest(), nil
+			// add the checksum parameter for go-getter to verify the download for us.
+			if sha256 != "" {
+				url = url + "?checksum=sha256:" + sha256
 			}
+		}
+
+		log.Printf("[DEBUG] fetching provider info for %s version %s from %s", provider, v, url)
+		if checkPlugin(url, i.PluginProtocolVersion) {
+			i.Ui.Info(fmt.Sprintf("- Downloading plugin for provider %q (%s)...", provider, v.String()))
+			log.Printf("[DEBUG] getting provider %q version %q", provider, v)
+			err := i.install(provider, v, url)
+			if err != nil {
+				return PluginMeta{}, err
+			}
+
+			// Find what we just installed
+			// (This is weird, because go-getter doesn't directly return
+			//  information about what was extracted, and we just extracted
+			//  the archive directly into a shared dir here.)
+			log.Printf("[DEBUG] looking for the %s %s plugin we just installed", provider, v)
+			metas := FindPlugins("provider", []string{i.Dir})
+			log.Printf("[DEBUG] all plugins found %#v", metas)
+			metas, _ = metas.ValidateVersions()
+			metas = metas.WithName(provider).WithVersion(v)
+			log.Printf("[DEBUG] filtered plugins %#v", metas)
+			if metas.Count() == 0 {
+				// This should never happen. Suggests that the release archive
+				// contains an executable file whose name doesn't match the
+				// expected convention.
+				return PluginMeta{}, fmt.Errorf(
+					"failed to find installed plugin version %s; this is a bug in Terraform and should be reported",
+					v,
+				)
+			}
+
+			if metas.Count() > 1 {
+				// This should also never happen, and suggests that a
+				// particular version was re-released with a different
+				// executable filename. We consider releases as immutable, so
+				// this is an error.
+				return PluginMeta{}, fmt.Errorf(
+					"multiple plugins installed for version %s; this is a bug in Terraform and should be reported",
+					v,
+				)
+			}
+
+			// By now we know we have exactly one meta, and so "Newest" will
+			// return that one.
+			return metas.Newest(), nil
 		}
 
 		log.Printf("[INFO] incompatible ProtocolVersion for %s version %s", provider, v)
@@ -360,18 +374,13 @@ func (i *ProviderInstaller) providerChecksumURL(name, version string, fallback b
 	return u
 }
 
-func (i *ProviderInstaller) getProviderChecksum(name, version string) (string, error) {
-	url := i.providerChecksumURL(name, version, false)
-	checksums, err := getPluginSHA256SUMs(url)
+func (i *ProviderInstaller) getProviderChecksum(name, version string, fallback bool) (string, error) {
+	url := i.providerChecksumURL(name, version, fallback)
+	checksums, err := getPluginSHA256SUMs(url, fallback)
 
 	if err != nil {
 		log.Printf("[WARN] Error getting checksum from %s %s", url, err)
-		url = i.providerChecksumURL(name, version, true)
-		checksums, err = getPluginSHA256SUMs(url)
-		if err != nil {
-			log.Printf("[ERROR] Error getting checksum from %s %s", url, err)
-			return "", err
-		}
+		return "", err
 	}
 
 	return checksumForFile(checksums, i.providerFileName(name, version)), nil
@@ -410,19 +419,14 @@ func checkPlugin(url string, pluginProtocolVersion uint) bool {
 }
 
 // list the version available for the named plugin
-func (i *ProviderInstaller) listProviderVersions(name string) ([]Version, error) {
-	url := i.providerVersionsURL(name, false)
+func (i *ProviderInstaller) listProviderVersions(name string, fallback bool) ([]Version, error) {
+	url := i.providerVersionsURL(name, fallback)
 	versions, err := listPluginVersions(url)
-	if err != nil || len(versions) == 0 {
+	if err != nil {
 		// listPluginVersions returns a verbose error message indicating
 		// what was being accessed and what failed
-		log.Printf("[WARN] Error listing versions from %s %s", url, err)
-		url = i.providerVersionsURL(name, true)
-		versions, err = listPluginVersions(url)
-		if err != nil {
-			log.Printf("[ERROR] Error listing versions from %s %s", url, err)
-			return nil, err
-		}
+		log.Printf("[ERROR] Error listing versions from %s %s", url, err)
+		return nil, err
 	}
 	log.Printf("[DEBUG] Retrieved %d versions from %s", len(versions), url)
 	return versions, nil
@@ -528,7 +532,7 @@ func checksumForFile(sums []byte, name string) string {
 }
 
 // fetch the SHA256SUMS file provided, and verify its signature.
-func getPluginSHA256SUMs(sumsURL string) ([]byte, error) {
+func getPluginSHA256SUMs(sumsURL string, fallback bool) ([]byte, error) {
 	sigURL := sumsURL + ".sig"
 
 	sums, err := getFile(sumsURL)
@@ -536,20 +540,16 @@ func getPluginSHA256SUMs(sumsURL string) ([]byte, error) {
 		return nil, fmt.Errorf("error fetching checksums: %s", err)
 	}
 
-	enforceCheckSig := true
 	sig, err := getFile(sigURL)
 	if err != nil {
-		if GetReleaseHost(false) == GetReleaseHost(true) || !strings.HasPrefix(sumsURL, GetReleaseHost(false)) || err.Error() != "404 Not Found" {
+		if fallback {
 			return nil, fmt.Errorf("error fetching checksums signature: %s", err)
-		} else {
-			enforceCheckSig = false
 		}
+		return sums, nil
 	}
 
-	if enforceCheckSig {
-		if err := verifySig(sums, sig); err != nil {
-			return nil, err
-		}
+	if err := verifySig(sums, sig); err != nil {
+		return nil, err
 	}
 
 	return sums, nil
